@@ -77,63 +77,91 @@ class DebandRenderer(
             uniform highp vec2 u_ScreenSize;
             uniform highp float u_Sharpness;
 
-            const float DEBAND_THRESHOLD = 0.015;
-            const float DEBAND_RANGE = 16.0;
-            const float DITHER_GRAIN = 0.015;
+            // Stochastic Debanding v2 Parameters
+            const float DEBAND_THRESHOLD = 0.02;   // Sensitivity to banding steps (lower = safer for textures)
+            const int NUM_SAMPLES = 24;            // More samples = smoother gradients
+            const float MAX_RADIUS = 24.0;         // Effective sampling radius
+            const float GRAIN_STRENGTH = 0.003;    // Slightly reduced grain
 
+            // Interleaved Gradient Noise
             highp float ign(vec2 v) {
                 v = floor(v * u_ScreenSize);
                 return fract(52.9829189 * fract(dot(v, vec2(0.06711056, 0.00583715))));
             }
 
+            // High quality fast PRNG
             highp float rand(vec2 co, float seed) {
                 return fract(sin(dot(co + seed, vec2(12.9898, 78.233))) * 43758.5453);
             }
 
             void main() {
                 highp vec2 texelSize = 1.0 / u_ScreenSize;
-                float frameSeed = fract(u_Time * 0.05); 
+                vec3 original = texture(u_Texture, v_TexCoord).rgb;
                 
-                // 1. Debanding Pass
-                // We must sample 4 specific neighbors for later RCAS usage to avoid re-sampling texture
-                vec3 color = texture(u_Texture, v_TexCoord).rgb;
+                // ═══════════════════════════════════════════════════════════════
+                // STOCHASTIC DEBANDING (libplacebo-inspired)
+                // ═══════════════════════════════════════════════════════════════
+                
+                vec3 sum = original;
+                float totalW = 1.0;
+                
+                // Use IGN + Time for jittered sampling
+                float noise = ign(v_TexCoord);
+                float timeSeed = fract(u_Time * 0.1);
+                
+                for (int i = 0; i < NUM_SAMPLES; i++) {
+                    // Generate pseudo-random angle and radius
+                    float fi = float(i);
+                    float angle = (fi + noise) * 2.3999632; // Golden angle for distribution
+                    float r = sqrt((fi + 0.5) / float(NUM_SAMPLES)) * MAX_RADIUS;
+                    
+                    vec2 offset = vec2(cos(angle), sin(angle)) * r * texelSize;
+                    vec3 s = texture(u_Texture, clamp(v_TexCoord + offset, 0.0, 1.0)).rgb;
+                    
+                    // Difference check: only average pixels that could be part of the same gradient
+                    float diff = max(max(abs(original.r - s.r), abs(original.g - s.g)), abs(original.b - s.b));
+                    
+                    // Soft threshold: skip edges, keep gradients. 
+                    // Lower threshold means we only blend very similar colors.
+                    float w = 1.0 - smoothstep(0.0, DEBAND_THRESHOLD, diff);
+                    sum += s * w;
+                    totalW += w;
+                }
+                
+                vec3 debanded = sum / totalW;
+                vec3 color = debanded;
+
+                // ═══════════════════════════════════════════════════════════════
+                // RCAS (Robust Contrast Adaptive Sharpening)
+                // ═══════════════════════════════════════════════════════════════
+                
+                // Sample neighbors from the original texture for better edge detection
                 vec3 b = texture(u_Texture, v_TexCoord + vec2(0.0, -texelSize.y)).rgb;
                 vec3 d = texture(u_Texture, v_TexCoord + vec2(-texelSize.x, 0.0)).rgb;
                 vec3 f = texture(u_Texture, v_TexCoord + vec2(texelSize.x, 0.0)).rgb;
                 vec3 h = texture(u_Texture, v_TexCoord + vec2(0.0, texelSize.y)).rgb;
-
-                // Simple deband on center pixel (simplified but works with FSR)
-                for (int i = 0; i < 8; i++) {
-                    float angle = float(i) * 0.785 + rand(v_TexCoord, 0.0) * 0.5;
-                    float dist = DEBAND_RANGE * (0.3 + 0.7 * rand(v_TexCoord, float(i)));
-                    highp vec2 dir = vec2(cos(angle), sin(angle));
-                    vec3 sampleColor = texture(u_Texture, clamp(v_TexCoord + dir * dist * texelSize, 0.0, 1.0)).rgb;
-                    float weight = 1.0 - smoothstep(0.0, DEBAND_THRESHOLD, max(max(abs(color.r - sampleColor.r), abs(color.g - sampleColor.g)), abs(color.b - sampleColor.b)));
-                    color = mix(color, sampleColor, weight * 0.3);
-                }
-
-                // 2. FSR 1.0 (RCAS)
-                // IMPORTANT: We must use the CLEANED color, but RCAS needs neighbors.
-                // For mobile efficiency, we use raw neighbors but apply a threshold to the sharpening weight.
+                
                 if (u_Sharpness > 0.0) {
-                    float peak = -1.0 / mix(8.0, 5.0, u_Sharpness);
+                    // Increased peak for more "bite"
+                    float peak = -1.0 / mix(8.0, 4.0, u_Sharpness);
                     vec3 e = color;
                     
                     vec3 minRGB = min(min(min(min(b, d), f), h), e);
                     vec3 maxRGB = max(max(max(max(b, d), f), h), e);
                     
-                    // Modify contrast detect to ignore debanding "artifacts"
-                    // min(minRGB, 1.0 - maxRGB) - 0.02 avoids sharpening low-contrast gradients
-                    vec3 amp = clamp((min(minRGB, 1.0 - maxRGB) - 0.02) / max(maxRGB, 0.01), 0.0, 1.0);
+                    // Reduced contrast protection (0.01 instead of 0.03) to sharpen darker details better
+                    vec3 amp = clamp((min(minRGB, 1.0 - maxRGB) - 0.01) / max(maxRGB, 0.01), 0.0, 1.0);
                     amp = sqrt(amp);
                     float w = peak * amp.r; 
                     
-                    color = clamp(( (b + d + f + h) * w + e) / (4.0 * w + 1.0), 0.0, 1.0);
+                    color = clamp(((b + d + f + h) * w + e) / (4.0 * w + 1.0), 0.0, 1.0);
                 }
 
-                // 3. Dithering
-                float noise = (ign(v_TexCoord + frameSeed) - 0.5) * DITHER_GRAIN;
-                color += vec3(noise);
+                // ═══════════════════════════════════════════════════════════════
+                // FINAL DITHER
+                // ═══════════════════════════════════════════════════════════════
+                float dither = (ign(v_TexCoord + timeSeed) - 0.5) * 0.005;
+                color += vec3(dither + GRAIN_STRENGTH * (rand(v_TexCoord, timeSeed) - 0.5));
 
                 outColor = vec4(color, 1.0);
             }
