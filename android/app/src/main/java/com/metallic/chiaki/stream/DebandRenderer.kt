@@ -77,9 +77,9 @@ class DebandRenderer(
             uniform highp vec2 u_ScreenSize;
             uniform highp float u_Sharpness;
 
-            const float DEBAND_THRESHOLD = 0.04;
-            const float DEBAND_RANGE = 32.0;
-            const float DITHER_GRAIN = 0.012;
+            const float DEBAND_THRESHOLD = 0.015;
+            const float DEBAND_RANGE = 16.0;
+            const float DITHER_GRAIN = 0.015;
 
             highp float ign(vec2 v) {
                 v = floor(v * u_ScreenSize);
