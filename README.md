@@ -30,7 +30,7 @@ Basically debanding is already implemented in chiaki-ng for Steam Deck and Windo
 
 ### Installation
 
-1. Download the latest APK from the [Releases] page.
+1. Download the latest APK from the [Releases](https://github.com/SalamiTheMan/chiaki-ng-android-extended/releases) page.
 2. Install the APK on your Android device.
 3. Open Chiaki and follow the instructions to register your console.
 
